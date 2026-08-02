@@ -1,0 +1,46 @@
+{
+  "name": "chrome-extension-upload",
+  "version": "6.0.0",
+  "private": true,
+  "description": "upload & publish extensions to the Chrome Web Store",
+  "main": "lib/main.js",
+  "scripts": {
+    "build": "tsc",
+    "format": "prettier --write **/*.ts",
+    "format-check": "prettier --check **/*.ts",
+    "lint": "eslint src/**/*.ts",
+    "pack": "ncc build",
+    "test": "jest --passWithNoTests",
+    "all": "npm run build && npm run format && npm run lint && npm run pack"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/step-security/chrome-extension-upload.git"
+  },
+  "keywords": [
+    "actions",
+    "node",
+    "setup"
+  ],
+  "author": "step-security",
+  "license": "MIT",
+  "dependencies": {
+    "@actions/core": "^1.2.6",
+    "axios": "^1.18.1",
+    "chrome-webstore-upload": "1.0.0",
+    "glob": "^7.1.6"
+  },
+  "devDependencies": {
+    "@types/glob": "^7.1.1",
+    "@types/node": "^12.7.12",
+    "@typescript-eslint/eslint-plugin": "^5.3.0",
+    "@typescript-eslint/parser": "^5.3.0",
+    "@vercel/ncc": "^0.36.0",
+    "eslint": "^8.2.0",
+    "eslint-plugin-jest": "^22.21.0",
+    "jest": "^29.0.0",
+    "prettier": "^1.19.1",
+    "ts-jest": "^29.0.0",
+    "typescript": "^5.0.0"
+  }
+}
