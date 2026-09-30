@@ -1,9 +1,21 @@
-import * as core from '@actions/core'
+import {debug, getInput, setFailed, setSecret} from '@actions/core'
 import fs from 'fs'
 import path from 'path'
-import glob from 'glob'
+import {globSync} from 'glob'
 import chromeWebstoreUpload from 'chrome-webstore-upload'
 import {validateSubscription} from './subscription'
+
+type WebStoreClient = ReturnType<typeof chromeWebstoreUpload>
+
+const SUCCESSFUL_PUBLISH_STATES = new Set([
+  'PENDING_REVIEW',
+  'PUBLISHED',
+  'PUBLISHED_TO_TESTERS'
+])
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
 
 function validateFilePath(filePath: string): void {
   const workspace = process.env.GITHUB_WORKSPACE
@@ -17,94 +29,109 @@ function validateFilePath(filePath: string): void {
   }
 }
 
-function uploadFile(
-  webStore: any,
+async function uploadFile(
+  webStore: WebStoreClient,
   filePath: string,
-  publishFlg: string,
-  publishTarget: string
-): void {
-  const myZipFile = fs.createReadStream(filePath)
-  webStore
-    .uploadExisting(myZipFile)
-    .then((uploadRes: any) => {
-      core.debug(JSON.stringify(uploadRes))
+  publish: boolean
+): Promise<void> {
+  let token: string
+  let uploadState: string | undefined
 
-      if (
-        uploadRes.uploadState &&
-        (uploadRes.uploadState === 'FAILURE' ||
-          uploadRes.uploadState === 'NOT_FOUND')
-      ) {
-        uploadRes.itemError.forEach((itemError: any) => {
-          core.error(
-            Error(`${itemError.error_detail} (${itemError.error_code})`)
-          )
-        })
-        core.setFailed(
-          'upload error - You will need to go to the Chrome Web Store Developer Dashboard and upload it manually.'
-        )
-        return
-      }
+  try {
+    token = await webStore.fetchToken()
+    const zipFile = fs.createReadStream(filePath)
+    const uploadResponse = await webStore.uploadExisting(zipFile, token, 60)
+    debug(`Chrome Web Store upload state: ${uploadResponse.uploadState}`)
+    uploadState = uploadResponse.uploadState
+  } catch (error) {
+    throw new Error(
+      `upload error - ${errorMessage(error)} Publishing was not attempted.`
+    )
+  }
 
-      if (publishFlg === 'true') {
-        webStore
-          .publish(publishTarget)
-          .then((publishRes: any) => {
-            core.debug(JSON.stringify(publishRes))
-          })
-          .catch((e: any) => {
-            core.error(e)
-            core.setFailed(
-              'publish error - You will need to access the Chrome Web Store Developer Dashboard and publish manually.'
-            )
-          })
-      }
-    })
-    .catch((e: any) => {
-      core.error(e)
-      core.setFailed(
-        'upload error - You will need to go to the Chrome Web Store Developer Dashboard and upload it manually.'
+  if (uploadState !== 'SUCCEEDED') {
+    throw new Error(
+      `upload error - Chrome Web Store returned upload state "${uploadState ||
+        'missing'}". Publishing was not attempted. Check the Chrome Web Store Developer Dashboard for details.`
+    )
+  }
+
+  if (!publish) {
+    return
+  }
+
+  try {
+    const publishResponse = await webStore.publish('DEFAULT_PUBLISH', token)
+    debug(`Chrome Web Store publish state: ${publishResponse.state}`)
+    if (!SUCCESSFUL_PUBLISH_STATES.has(publishResponse.state)) {
+      throw new Error(
+        `Chrome Web Store returned publish state "${publishResponse.state ||
+          'missing'}".`
       )
-    })
+    }
+  } catch (error) {
+    throw new Error(
+      `publish error - Upload succeeded, but publishing failed: ${errorMessage(
+        error
+      )}. Publish the uploaded package manually from the Chrome Web Store Developer Dashboard.`
+    )
+  }
 }
 
-async function run(): Promise<void> {
+export async function run(): Promise<void> {
   try {
     await validateSubscription()
-    const filePath = core.getInput('file-path', {required: true})
-    const extensionId = core.getInput('extension-id', {required: true})
-    const clientId = core.getInput('client-id', {required: true})
-    const clientSecret = core.getInput('client-secret', {required: true})
-    const refreshToken = core.getInput('refresh-token', {required: true})
-    const globFlg = core.getInput('glob') as 'true' | 'false'
-    const publishFlg = core.getInput('publish') as 'true' | 'false'
-    const publishTarget = core.getInput('publish-target')
+    const filePath = getInput('file-path', {required: true})
+    const extensionId = getInput('extension-id', {required: true})
+    const publisherId = getInput('publisher-id', {required: true})
+    const clientId = getInput('client-id', {required: true})
+    const clientSecret = getInput('client-secret', {required: true})
+    const refreshToken = getInput('refresh-token', {required: true})
+    const useGlob = getInput('glob') === 'true'
+    const publish = getInput('publish') === 'true'
+    if (publish && getInput('publish-target') === 'trustedTesters') {
+      throw new Error(
+        'publish-target has been removed. Configure the item visibility in the Chrome Web Store Developer Dashboard and remove publish-target from your workflow before publishing.'
+      )
+    }
 
-    core.setSecret(clientId)
-    core.setSecret(clientSecret)
-    core.setSecret(refreshToken)
+    setSecret(clientId)
+    setSecret(clientSecret)
+    setSecret(refreshToken)
 
     const webStore = chromeWebstoreUpload({
       extensionId,
+      publisherId,
       clientId,
       clientSecret,
       refreshToken
     })
 
-    if (globFlg === 'true') {
-      const files = glob.sync(filePath)
-      if (files.length > 0) {
-        validateFilePath(files[0])
-        uploadFile(webStore, files[0], publishFlg, publishTarget)
-      } else {
-        core.setFailed('No files to match.')
+    let uploadPath = filePath
+    if (useGlob) {
+      const isWindows = process.platform === 'win32'
+      const files = globSync(filePath, {
+        windowsPathsNoEscape: isWindows
+      }).sort((a, b) => {
+        if (isWindows) {
+          a = a.replace(/\\/g, '/')
+          b = b.replace(/\\/g, '/')
+        }
+        return a.localeCompare(b, 'en')
+      })
+      if (files.length === 0) {
+        throw new Error('No files to match.')
       }
-    } else {
-      validateFilePath(filePath)
-      uploadFile(webStore, filePath, publishFlg, publishTarget)
+      uploadPath = files[0]
     }
+
+    validateFilePath(uploadPath)
+    await uploadFile(webStore, uploadPath, publish)
   } catch (error) {
-    core.setFailed((error as Error).message)
+    setFailed(errorMessage(error))
   }
 }
 
-run()
+if (require.main === module) {
+  void run()
+}
